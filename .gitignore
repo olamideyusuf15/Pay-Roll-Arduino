@@ -1,32 +1,351 @@
-# Prerequisites
-*.d
+#include <Wire.h>
+#include <Adafruit_RGBLCDShield.h>
+#include <EEPROM.h>
+#include <MemoryFree.h>
 
-# Compiled Object files
-*.slo
-*.lo
-*.o
-*.obj
+Adafruit_RGBLCDShield lcd = Adafruit_RGBLCDShield();
 
-# Precompiled Headers
-*.gch
-*.pch
+// Defing colours for lcd backlight
+#define RED 0x1
+#define GREEN 0x2
+#define PURPLE 0x5
+#define YELLOW 0x3
+#define WHITE 0x7
 
-# Compiled Dynamic libraries
-*.so
-*.dylib
-*.dll
+//The following lines are to define and enable debugging
+#define DEBUG
 
-# Fortran module files
-*.mod
-*.smod
 
-# Compiled Static libraries
-*.lai
-*.la
-*.a
-*.lib
+#ifdef DEBUG
+  #define print_debug(x) Serial.print(x)
+  #define println_debug(x) Serial.println(x)
+#else
+  #define print_debug(x) do {} while(0)
+  #define println_debug(x) do {} while(0)
+#endif 
 
-# Executables
-*.exe
-*.out
-*.app
+#ifdef BUTTON_DEBUG
+  #define button_debug(x) println_debug(x)
+#else
+  #define button_debug(x) do {} while(0)
+#endif
+
+struct PayrollAcc {
+    String id;
+    int grade;
+    String title;
+    float salary;
+    String pensionActive;
+    // Elements of payroll account
+};
+
+PayrollAcc accs[10]; // In order to manage memory, I am setting a limit on how many accounts
+int accountNum;
+int activeAccountIndex = 0; // Tracks which account is currently being displayed
+bool startMainPhase = false; // When main phase is not iniated, program is in idle state
+bool pressSelectButton = false; // This tracks whether select button is pressed
+unsigned long selectButtonTime = 0;
+unsigned long lastSent = 0; // Global variable for timestamp or update time
+
+// create up and down arrows for aesthetic
+byte upArrow[8] = { 0x1F, 0x04, 0x04, 0x04, 0x04, 0x04, 0x04, 0x00};
+byte downArrow[8] = { 0x04, 0x04, 0x04, 0x04, 0x04, 0x04, 0x1F, 0x00};
+
+// function for SRAM
+
+
+void setup() {
+    Serial.begin(9600);
+    lcd.begin(16, 2);
+    lcd.setBacklight(YELLOW);
+  // put your setup code here, to run once:
+  // use function to create the characters
+    lcd.createChar(0, upArrow);
+    lcd.createChar(1, downArrow);
+
+}
+
+void loop() {
+  // put your main code here, to run repeatedly:
+    if (!startMainPhase) {
+
+        unsigned long currentMillis = millis();
+        if ((currentMillis - lastSent) > 2000) { // Ensures that for every 2000 miliseconds the letter 'R' is printed
+            Serial.print("R");
+            lastSent = currentMillis;
+        }
+
+        if (Serial.available()) {
+            String input = Serial.readStringUntil('\n');
+            if (input == "BEGIN") {
+                lcd.setBacklight(WHITE);
+                Serial.println("BASIC");
+                startMainPhase = true;
+            } else {
+                Serial.println("ERROR: Unexpected message recieved.");
+                // If serial monitor recieves input 'BEGIN', it prints out 'BASIC'
+                // While also changing the colour of backlight and iniate main phase
+            }
+        }
+    } else { 
+        if (Serial.available()) {
+            String command = Serial.readStringUntil('\n');
+            processCommand(command);
+        }
+        handleButtons();
+    }
+}
+
+void processCommand(String command) {
+    if (command.startsWith("ADD")) handleAddCommand(command);
+    else if (command.startsWith("PST")) handlePensionActive(command);
+    else if (command.startsWith("GRD")) handleJobGrade(command);
+    else if (command.startsWith("SAL")) handleSalary(command);
+    else if (command.startsWith("CJT")) handleJobTitle(command);
+    else if (command.startsWith("DEL")) handleJobDeletion(command);
+    else Serial.println("ERROR: Invalid command format not understood");
+    // This function checks the start of string sent by user
+    // If they match to the following abbreviation, they are accepted as valid commands
+}
+
+// Track ID Function
+int findAccountIndex(String id) {
+    for (int i = 0; i < accountNum; i++) {
+         if (accs[i].id == id) return i;
+    }
+    return -1; // Means ID has not been found within the system
+}
+
+// Add Command Function
+void handleAddCommand(String message) {
+  if (accountNum >= 15) {
+      Serial.println("ERROR: Maximum number of accounts reached.");
+      return;
+  }
+
+  int idFront = message.indexOf("-") + 1;
+  int idBack = message.indexOf("-", idFront);
+  String id = message.substring(idFront, idBack);
+
+  int grade = message.substring(idBack + 1, idBack + 2).toInt();
+  String title = message.substring(idBack + 3);
+
+  if (id.length() == 7 && grade >= 1 && grade <= 9 && title.length() >= 3 && title.length() <= 17) {
+      accs[accountNum++] = {id, grade, title, 0.00, "NPEN"};
+      activeAccountIndex = accountNum - 1;
+      displayAccount(activeAccountIndex);
+      Serial.println("DONE!");
+  } else {
+      Serial.println("ERROR: Invalid ADD Command format");
+  }
+}
+
+// Pension Command Function
+void handlePensionActive(String message) {
+  int idFront = message.indexOf("-") + 1;
+  int idBack = message.indexOf("-", idFront);
+  String id = message.substring(idFront, idBack);
+  String active = message.substring(idBack + 1);
+
+  int index = findAccountIndex(id); // Must first find account in order to check or change whether pension is active
+  if (index == -1) {
+    Serial.println("ERROR: Account not found.");
+    return;
+    // Based on the findAccountIndex function
+    // -1 indicates account is not found
+  }
+
+  if (accs[index].salary == 0.00) {
+      Serial.println("ERROR: Salary is £0.00.");
+      return;
+      // If salary is 0.00, they can't have a pension status
+  }
+
+  if (active != "PEN" && active != "NPEN") {
+     Serial.println("ERROR: Invalid pension status");
+     return;
+  }
+
+  accs[index].pensionActive = active;
+  displayAccount(index);
+  Serial.println("DONE!");
+  updateBacklight(index);
+
+}
+
+// set Backlight based on Pension
+void updateBacklight(int index) {
+  if (accs[index].pensionActive == "PEN") {
+    lcd.setBacklight(GREEN); // Green for pension
+  } else if (accs[index].pensionActive == "NPEN") {
+    lcd.setBacklight(RED); // Red for not on pension
+  }
+}
+
+// Job Grading Function
+void handleJobGrade(String message) {
+    int idFront = message.indexOf("-") + 1;
+    int idBack = message.indexOf("-", idFront);
+    String id = message.substring(idFront, idBack);
+    int newGrade = message.substring(idBack + 1).toInt();
+
+    int index = findAccountIndex(id); 
+    if (index == -1) {
+        Serial.println("ERROR: Account not found.");
+        return;
+    }
+
+    if (newGrade <= accs[index].grade || newGrade < 1 || newGrade > 9) {
+        Serial.println("ERROR: Invalid job grade, must be numbers 1 to 9.");
+        return;
+    }
+    accs[index].grade = newGrade;
+    displayAccount(index); // Update display with new grade
+    Serial.println("DONE!");
+}
+
+// Salary Command Function
+void handleSalary(String message) {
+    int idFront = message.indexOf("-") + 1;
+    int idBack = message.indexOf("-", idFront);
+    String id = message.substring(idFront, idBack);
+    float newSalary = message.substring(idBack + 1).toFloat();
+
+    int index = findAccountIndex(id);
+    if (index == -1) {
+        Serial.println("ERROR; Account not found.");
+        return;
+    }
+
+    if (newSalary < 0 || newSalary >= 1000000) {
+        Serial.println("ERROR: Invalid Salary Range");
+        return;
+    }
+
+    accs[index].salary = round(newSalary * 100) / 100.0; // Round to 2dp
+    displayAccount(index);
+    Serial.println("DONE");
+
+}
+
+// Job Title Command Function
+void handleJobTitle(String message) {
+    int idFront = message.indexOf("-") + 1;
+    int idBack = message.indexOf("-", idFront);
+    String id = message.substring(idFront, idBack);
+    String newTitle = message.substring(idBack + 1);
+
+    int index = findAccountIndex(id);
+    if (index == -1) {
+        Serial.println("ERROR: Account not found.");
+        return;
+    }
+
+    if (newTitle.length() < 3 || newTitle.length() > 17) {
+        Serial.println("ERROR: Invalid job title length");
+        return;
+    }
+
+    accs[index].title = newTitle;
+    displayAccount(index); // Update display with new job title
+    Serial.println("DONE!");
+}
+
+// Account Deletion Command Function
+void handleJobDeletion(String message) {
+    int idFront = message.indexOf("-") + 1;
+    String id = message.substring(idFront);
+
+    int index = findAccountIndex(id);
+    if (index == -1) {
+        Serial.println("ERROR: Account not found.");
+        return;
+     }
+
+    for (int i = index; i < accountNum - 1; i++) {
+        accs[i] = accs[i + 1];
+     }
+    accountNum--;
+    activeAccountIndex = max(0, accountNum -1); // Show first or last account
+    displayAccount(activeAccountIndex);
+    Serial.println("DONE!");
+}
+
+void displayAccount(int index) {
+    PayrollAcc account = accs[index];
+    lcd.clear();
+    lcd.setCursor(0, 0);
+
+    if (index == 0) {
+        lcd.write(byte(0));
+    } else {
+      lcd.print(" ");
+    }
+
+    lcd.print(account.grade);
+    lcd.print(" ");
+    lcd.print(account.pensionActive);
+    lcd.print(" ");
+    lcd.print(String(account.salary, 2));
+
+    lcd.setCursor(0, 1);
+    if (index == accountNum - 1) {
+        lcd.print(" "); // Displays no arrow at the bottom
+    } else {
+       lcd.write(byte(1));
+    }
+    lcd.print(account.id);
+    lcd.print(" ");
+    lcd.print(account.title);
+
+    updateBacklight(index);
+}
+
+// Handle Button Navigation
+void handleButtons() {
+    uint8_t buttons = lcd.readButtons();
+    //Only print if a button is pressed
+    if (buttons) {
+      button_debug("Button pressed");
+    }
+
+    if (buttons & BUTTON_SELECT) {
+        button_debug("Select button pressed!");
+        if (!pressSelectButton) {
+            pressSelectButton = true;
+            selectButtonTime = millis();
+        } else {
+            if (millis() - selectButtonTime > 1000) {
+                lcd.clear();
+                lcd.setBacklight(PURPLE);
+                delay(10);
+                lcd.setCursor(0, 0);
+                lcd.print("FREE SRAM:");
+                lcd.print(freeMemory());
+                lcd.setCursor(1, 0);
+                lcd.print("F327557");
+            }
+        }
+    } else if (pressSelectButton) {
+        pressSelectButton = false;
+        // Revert to previous display
+        lcd.setBacklight(YELLOW);
+        displayAccount(activeAccountIndex);
+    }
+    if (!pressSelectButton) {
+        button_debug("Up button pressed");
+        if (buttons & BUTTON_UP) {
+            if (activeAccountIndex > 0) {
+                activeAccountIndex--;
+                displayAccount(activeAccountIndex);
+            }
+        }
+        if (buttons & BUTTON_DOWN) {
+            button_debug("Down button pressed");
+            if (activeAccountIndex < accountNum - 1) {
+                activeAccountIndex++;
+                displayAccount(activeAccountIndex);
+            }
+        }
+    }
+}
